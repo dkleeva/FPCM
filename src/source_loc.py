@@ -265,7 +265,7 @@ def rap_music_scan(spike, Gain, thresh, thr_svd):
         Valmax.append(valmax)
         Indmax.append(indmax)
 
-        A = Gain[:, indmax * 3 - 3:indmax * 3]
+        A = Gain[:, 3*indmax : 3*(indmax + 1)] 
         P = np.eye(Ns) - A @ np.linalg.inv(A.T @ A) @ A.T
         spike_proj = P @ spike
         G_proj = P @ Gain
