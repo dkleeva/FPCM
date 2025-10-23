@@ -16,6 +16,8 @@ import mne
 from typing import Tuple, Callable, List, Dict, Optional
 import math
 import matplotlib.pyplot as plt
+import nibabel as nib
+from nibabel.affines import apply_affine
 
 def fit_spike_dipoles(
     epochs: mne.Epochs,
@@ -365,3 +367,87 @@ def g3_to_g2(G3):
         G2d0[:, 2 * i:2 * i + 2] = gt
 
     return G2d, G2d0, Nsites
+
+
+def _mm_from_m(coords_m):
+    return np.asarray(coords_m, dtype=float) * 1000.0
+
+def _coords_surfaceRASmm_to_vox(coords_mm, vox2ras_tkr):
+    ras2vox_tkr = np.linalg.inv(vox2ras_tkr)
+    homo = np.c_[coords_mm, np.ones((coords_mm.shape[0], 1))]
+    vox = (ras2vox_tkr @ homo.T).T[:, :3]
+    return np.round(vox).astype(int)
+
+def _paint_sphere(volume, center_xyz, radius_vox):
+    x0, y0, z0 = center_xyz
+    nx, ny, nz = volume.shape
+    x_min, x_max = max(0, x0 - radius_vox), min(nx - 1, x0 + radius_vox)
+    y_min, y_max = max(0, y0 - radius_vox), min(ny - 1, y0 + radius_vox)
+    z_min, z_max = max(0, z0 - radius_vox), min(nz - 1, z0 + radius_vox)
+
+    xs = np.arange(x_min, x_max + 1)
+    ys = np.arange(y_min, y_max + 1)
+    zs = np.arange(z_min, z_max + 1)
+    X, Y, Z = np.meshgrid(xs, ys, zs, indexing='ij')
+    mask = (X - x0)**2 + (Y - y0)**2 + (Z - z0)**2 <= (radius_vox ** 2)
+    volume[x_min:x_max+1, y_min:y_max+1, z_min:z_max+1][mask] = volume.max()
+
+def save_dipoles_as_nifti_with_white_dots(
+    fit_res,
+    t1_mgz_path,
+    out_path,
+    fwd=None,    
+    trans=None,
+    radius_vox=3
+):
+    """
+    Put dipole markers into a copy of the T1 volume and save to NIfTI/MGZ.
+    """
+    if not os.path.exists(t1_mgz_path):
+        raise FileNotFoundError(f"Cannot find MRI file: {t1_mgz_path}")
+
+    # ---- Load MRI ----
+    img = nib.load(t1_mgz_path)
+    data = img.get_fdata()
+    hdr = img.header
+    vox2ras_tkr = hdr.get_vox2ras_tkr()
+    ras2vox_tkr = np.linalg.inv(vox2ras_tkr)
+
+    # ---- Collect dipole coordinates ----
+    rr_list = [np.atleast_2d(c) for c in fit_res.get("coords", [])]
+    if not rr_list:
+        raise ValueError("fit_res['coords'] is empty — nothing to plot.")
+    rr = np.vstack(rr_list)  # in meters
+
+    # ---- Detect coordinate frame ----
+    frame = None
+    if fwd is not None:
+        frame = fwd.get('coord_frame', None)
+
+    # ---- Convert to MRI ----
+    if frame == mne.io.constants.FIFF.FIFFV_COORD_HEAD and trans is not None:
+        t = mne.read_trans(trans) if isinstance(trans, str) else trans
+        rr = mne.transforms.apply_trans(t['trans'], rr)
+        rr_mm = _mm_from_m(rr)
+    else:
+        rr_mm = _mm_from_m(rr)
+
+    # ---- Convert to voxel ----
+    homo = np.c_[rr_mm, np.ones((rr_mm.shape[0], 1))]
+    vox = (ras2vox_tkr @ homo.T).T[:, :3]
+    vox = np.round(vox).astype(int)
+
+    # ---- Paint spheres ----
+    out_vol = data.copy()
+    vox_unique = np.unique(vox, axis=0)
+    for (x, y, z) in vox_unique:
+        if (0 <= x < out_vol.shape[0] and
+            0 <= y < out_vol.shape[1] and
+            0 <= z < out_vol.shape[2]):
+            _paint_sphere(out_vol, (x, y, z), radius_vox=radius_vox)
+
+    # ---- Save the file ----
+    out_img = img.__class__(out_vol, img.affine, header=hdr)
+    nib.save(out_img, out_path)
+    print(f"Saved dipoles to: {out_path}")
+    return out_path
