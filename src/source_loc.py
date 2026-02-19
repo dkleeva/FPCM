@@ -17,6 +17,7 @@ from typing import Tuple, Callable, List, Dict, Optional
 import math
 import matplotlib.pyplot as plt
 import nibabel as nib
+import os
 from nibabel.affines import apply_affine
 
 def fit_spike_dipoles(
